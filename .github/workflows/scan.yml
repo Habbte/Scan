@@ -1,0 +1,92 @@
+name: Scan ENCORE WETH Pair
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Scan pair events
+        env:
+          RPC_URL: https://ethereum-rpc.publicnode.com
+          PAIR: 0x2e0721E6C951710725997928DcAAa05DaaFa031B
+          FROM_BLOCK: 1
+          TO_BLOCK: 26110819
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "ENCORE / WETH Uniswap V2 pair scanner"
+          echo "========================================"
+          echo "Pair: $PAIR"
+          echo "Range: $FROM_BLOCK -> $TO_BLOCK"
+          echo
+
+          echo "Current reserves:"
+          cast call "$PAIR" \
+            "getReserves()(uint112,uint112,uint32)" \
+            --rpc-url "$RPC_URL"
+
+          echo
+          echo "Token0:"
+          cast call "$PAIR" \
+            "token0()(address)" \
+            --rpc-url "$RPC_URL"
+
+          echo
+          echo "Token1:"
+          cast call "$PAIR" \
+            "token1()(address)" \
+            --rpc-url "$RPC_URL"
+
+          echo
+          echo "Scanning Swap events..."
+
+          cast logs \
+            --rpc-url "$RPC_URL" \
+            --address "$PAIR" \
+            --from-block "$FROM_BLOCK" \
+            --to-block "$TO_BLOCK" \
+            'Swap(address,address,uint256,uint256,uint256,uint256,address)' \
+            > swaps.txt
+
+          echo
+          echo "========== SWAPS =========="
+          cat swaps.txt || true
+
+          echo
+          echo "Scanning Mint events..."
+
+          cast logs \
+            --rpc-url "$RPC_URL" \
+            --address "$PAIR" \
+            --from-block "$FROM_BLOCK" \
+            --to-block "$TO_BLOCK" \
+            'Mint(address,uint256,uint256)' \
+            > mints.txt
+
+          echo
+          echo "========== MINTS =========="
+          cat mints.txt || true
+
+          echo
+          echo "Scanning Burn events..."
+
+          cast logs \
+            --rpc-url "$RPC_URL" \
+            --address "$PAIR" \
+            --from-block "$FROM_BLOCK" \
+            --to-block "$TO_BLOCK" \
+            'Burn(address,uint256,uint256,address)' \
+            > burns.txt
+
+          echo
+          echo "========== BURNS =========="
+          cat burns.txt || true
