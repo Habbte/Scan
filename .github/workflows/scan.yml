@@ -1,4 +1,4 @@
-name: Scan ENCORE WETH Pair
+name: Scan ENCORE WETH pair
 
 on:
   workflow_dispatch:
@@ -8,85 +8,195 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: stable
-
-      - name: Scan pair events
-        env:
-          RPC_URL: https://ethereum-rpc.publicnode.com
-          PAIR: 0x2e0721E6C951710725997928DcAAa05DaaFa031B
-          FROM_BLOCK: 1
-          TO_BLOCK: 26110819
+      - name: Scan Ethereum pair
         run: |
-          set -e
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.request
 
-          echo "========================================"
-          echo "ENCORE / WETH Uniswap V2 pair scanner"
-          echo "========================================"
-          echo "Pair: $PAIR"
-          echo "Range: $FROM_BLOCK -> $TO_BLOCK"
-          echo
+          RPC = "https://ethereum-rpc.publicnode.com"
+          PAIR = "0x2e0721E6C951710725997928DcAAa05DaaFa031B"
 
-          echo "Current reserves:"
-          cast call "$PAIR" \
-            "getReserves()(uint112,uint112,uint32)" \
-            --rpc-url "$RPC_URL"
+          # Start well before the period we're interested in.
+          FROM_BLOCK = 23000000
 
-          echo
-          echo "Token0:"
-          cast call "$PAIR" \
-            "token0()(address)" \
-            --rpc-url "$RPC_URL"
+          # Current block from your RPC query.
+          TO_BLOCK = 26110819
 
-          echo
-          echo "Token1:"
-          cast call "$PAIR" \
-            "token1()(address)" \
-            --rpc-url "$RPC_URL"
+          # Small enough to avoid RPC range problems.
+          CHUNK = 5000
 
-          echo
-          echo "Scanning Swap events..."
+          EVENTS = {
+              "Swap": "d78ad95fa46c994b6551d0da85fc275fe6135a0d3f0f6e1e7f3a8b1f1f5b4e5b",
+              "Mint": "4c209b5fc8ad5078c6a1f5b6f6c7f2b6c0d9f7e1b6e7c7f7f0f0f0f0f0f0f0f",
+              "Burn": "dccd412f0c1d6f0c0f6e8b8f0f4d6f6e4b6b4e4b4c4d4c4e4f4f4f4f4f4f4"
+          }
 
-          cast logs \
-            --rpc-url "$RPC_URL" \
-            --address "$PAIR" \
-            --from-block "$FROM_BLOCK" \
-            --to-block "$TO_BLOCK" \
-            'Swap(address,address,uint256,uint256,uint256,uint256,address)' \
-            > swaps.txt
+          def rpc(method, params):
+              payload = json.dumps({
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": method,
+                  "params": params
+              }).encode()
 
-          echo
-          echo "========== SWAPS =========="
-          cat swaps.txt || true
+              for attempt in range(6):
+                  try:
+                      req = urllib.request.Request(
+                          RPC,
+                          data=payload,
+                          headers={"Content-Type": "application/json"}
+                      )
+                      with urllib.request.urlopen(req, timeout=60) as r:
+                          data = json.loads(r.read())
 
-          echo
-          echo "Scanning Mint events..."
+                      if "error" in data:
+                          raise Exception(data["error"])
 
-          cast logs \
-            --rpc-url "$RPC_URL" \
-            --address "$PAIR" \
-            --from-block "$FROM_BLOCK" \
-            --to-block "$TO_BLOCK" \
-            'Mint(address,uint256,uint256)' \
-            > mints.txt
+                      return data["result"]
 
-          echo
-          echo "========== MINTS =========="
-          cat mints.txt || true
+                  except Exception as e:
+                      print("RPC retry", attempt + 1, e)
+                      time.sleep(3 * (attempt + 1))
 
-          echo
-          echo "Scanning Burn events..."
+              raise RuntimeError("RPC failed repeatedly")
 
-          cast logs \
-            --rpc-url "$RPC_URL" \
-            --address "$PAIR" \
-            --from-block "$FROM_BLOCK" \
-            --to-block "$TO_BLOCK" \
-            'Burn(address,uint256,uint256,address)' \
-            > burns.txt
+          def call(signature):
+              # function selector generated from known Uniswap V2 ABI
+              import hashlib
 
-          echo
-          echo "========== BURNS =========="
-          cat burns.txt || true
+              # We will use eth_call through raw calldata below.
+              return None
+
+          print("=" * 60)
+          print("ENCORE / WETH PAIR SCAN")
+          print("=" * 60)
+          print("Pair:", PAIR)
+          print("Blocks:", FROM_BLOCK, "->", TO_BLOCK)
+          print()
+
+          # Current reserves
+          # getReserves() selector = 0x0902f1ac
+          result = rpc("eth_call", [{
+              "to": PAIR,
+              "data": "0x0902f1ac"
+          }, "latest"])
+
+          reserve0 = int(result[2:66], 16)
+          reserve1 = int(result[66:130], 16)
+          timestamp = int(result[130:194], 16)
+
+          print("CURRENT RESERVES")
+          print("WETH  :", reserve0 / 10**18)
+          print("ENCORE:", reserve1 / 10**18)
+          print("Pair reserve timestamp:", timestamp)
+          print()
+
+          # Correct Uniswap V2 event topics.
+          # keccak256 of the event signatures.
+          # These are calculated here using pycryptodome.
+          try:
+              from Crypto.Hash import keccak
+          except ImportError:
+              import subprocess
+              subprocess.run(
+                  ["pip", "install", "-q", "pycryptodome"],
+                  check=True
+              )
+              from Crypto.Hash import keccak
+
+          def topic(signature):
+              k = keccak.new(digest_bits=256)
+              k.update(signature.encode())
+              return "0x" + k.hexdigest()
+
+          topics = {
+              "Swap": topic(
+                  "Swap(address,uint256,uint256,uint256,uint256,address)"
+              ),
+              "Mint": topic(
+                  "Mint(address,uint256,uint256)"
+              ),
+              "Burn": topic(
+                  "Burn(address,uint256,uint256,address)"
+              )
+          }
+
+          print("EVENT TOPICS READY")
+          print()
+
+          found = []
+
+          block = FROM_BLOCK
+
+          while block <= TO_BLOCK:
+              end = min(block + CHUNK - 1, TO_BLOCK)
+
+              print(f"Scanning {block} -> {end}")
+
+              logs = rpc("eth_getLogs", [{
+                  "address": PAIR,
+                  "fromBlock": hex(block),
+                  "toBlock": hex(end),
+                  "topics": [[
+                      topics["Swap"],
+                      topics["Mint"],
+                      topics["Burn"]
+                  ]]
+              }])
+
+              for log in logs:
+                  t = log["topics"][0].lower()
+
+                  if t == topics["Swap"].lower():
+                      kind = "SWAP"
+                  elif t == topics["Mint"].lower():
+                      kind = "MINT"
+                  elif t == topics["Burn"].lower():
+                      kind = "BURN"
+                  else:
+                      kind = "OTHER"
+
+                  item = {
+                      "type": kind,
+                      "block": int(log["blockNumber"], 16),
+                      "tx": log["transactionHash"],
+                      "logIndex": int(log["logIndex"], 16)
+                  }
+
+                  found.append(item)
+                  print("FOUND:", item)
+
+              block = end + 1
+
+          print()
+          print("=" * 60)
+          print("RESULT")
+          print("=" * 60)
+
+          if not found:
+              print("NO SWAP / MINT / BURN EVENTS FOUND")
+          else:
+              found.sort(key=lambda x: (x["block"], x["logIndex"]))
+
+              print("Total events:", len(found))
+              print()
+
+              for x in found[-20:]:
+                  print(
+                      x["type"],
+                      "block", x["block"],
+                      x["tx"]
+                  )
+
+              print()
+              print("LAST EVENT:")
+              print(found[-1])
+
+          print()
+          print("CURRENT STORED RESERVES:")
+          print("WETH  :", reserve0 / 10**18)
+          print("ENCORE:", reserve1 / 10**18)
+          print("Reserve timestamp:", timestamp)
+          PY
